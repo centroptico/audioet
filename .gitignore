@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+dist
+coverage
+public/ffmpeg
+.env
+.env.local
+.env.*.local
+*.log
+tmp
+.DS_Store
+tsconfig.tsbuildinfo
