@@ -7,7 +7,7 @@ export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 /**
- * Forwards one audio slice to OpenRouter and returns `{ text }`.
+ * Forwards one audio slice to OpenRouter and returns `{ text, cost, seconds, costKnown }`.
  * The bytes exist only for this request. Nothing is written to disk,
  * Blob storage, or a database.
  */
@@ -54,18 +54,28 @@ export async function POST(request: Request): Promise<Response> {
   const siteUrl = process.env.OPENROUTER_SITE_URL || origin || undefined;
 
   try {
-    const text = await transcribeWithOpenRouter({
+    const result = await transcribeWithOpenRouter({
       apiKey,
       bytes,
       format,
       siteUrl,
       signal: request.signal,
     });
-    return Response.json({ text });
+    return Response.json({
+      text: result.text,
+      cost: result.cost,
+      seconds: result.seconds,
+      costKnown: result.costKnown,
+    });
   } catch (error) {
     if (error instanceof OpenRouterError) {
       return Response.json(
-        { error: `OpenRouter: ${error.message}` },
+        {
+          error: `OpenRouter: ${error.message}`,
+          ...(error.usage
+            ? { cost: error.usage.cost, seconds: error.usage.seconds, costKnown: error.usage.costKnown }
+            : {}),
+        },
         { status: error.status === 499 ? 499 : error.status },
       );
     }

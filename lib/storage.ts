@@ -22,6 +22,12 @@ export type PersistedTranscript = {
   fileSize: number;
   durationSec: number;
   editedText: string | null;
+  /** Running USD total. Missing on older saves, which load as 0. */
+  costUsd: number;
+  /** Sum of usage.seconds across billed calls. */
+  billedSeconds: number;
+  /** False when at least one call did not report usage.cost. */
+  costKnown: boolean;
   chunks: PersistedChunk[];
   updatedAt: number;
 };
@@ -47,6 +53,10 @@ export function persistableChunks(chunks: readonly ChunkRecord[]): PersistedChun
   }));
 }
 
+function asMoney(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 function isPersisted(value: unknown): value is PersistedTranscript {
   if (!value || typeof value !== "object") return false;
   const record = value as PersistedTranscript;
@@ -64,7 +74,12 @@ export function loadTranscript(store: KeyValueStore): PersistedTranscript | null
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!isPersisted(parsed)) return null;
-    return parsed;
+    return {
+      ...parsed,
+      costUsd: asMoney(parsed.costUsd),
+      billedSeconds: asMoney(parsed.billedSeconds),
+      costKnown: typeof parsed.costKnown === "boolean" ? parsed.costKnown : false,
+    };
   } catch {
     return null;
   }

@@ -9,11 +9,12 @@ El audio **no se guarda**. No hay base de datos, ni Blob, ni disco. El archivo s
 1. Eliges o arrastras un audio (`m4a`/`aac` de iPhone o WhatsApp, `ogg`/`opus` de WhatsApp, `mp3`, `wav`, `webm`).
 2. El navegador carga **ffmpeg.wasm de un solo hilo** (no hace falta `SharedArrayBuffer` ni cabeceras COOP/COEP). El archivo se monta con **WORKERFS**, así que los ~300 MB no se copian al heap de wasm.
 3. Cada fragmento se recodifica a **mono, 16 kHz, MP3 a 32 kbps** y se sube a `POST /api/transcribe`.
-4. Esa ruta de Next.js (runtime Node, `maxDuration` 300) reenvía el audio a OpenRouter, modelo `x-ai/grok-stt-2.0`, y devuelve `{ text }`. El navegador no habla con OpenRouter.
+4. Esa ruta de Next.js (runtime Node, `maxDuration` 300) reenvía el audio a OpenRouter, modelo `x-ai/grok-stt-2.0`, y devuelve `{ text, cost, seconds, costKnown }`. Si `usage.cost` no viene, `cost` es 0 y `costKnown` es falso. El navegador no habla con OpenRouter.
 5. Se transcriben **3 fragmentos a la vez** mientras se codifica el siguiente. Si uno responde 429, 5xx o se cae la red, se reintenta con espera exponencial (1 s, 2 s, 4 s, hasta 4 intentos). Si pesa demasiado (413) o el proveedor no responde a tiempo (408/504/524), el fragmento se parte por la mitad y se vuelve a intentar.
 6. El texto se concatena **en orden de índice**. La caja grande se va llenando con el prefijo ya terminado. Puedes copiarlo, editarlo y recargar: el texto queda en `localStorage` hasta que pulses **Borrar** o elijas **otro** archivo. Si vuelves a elegir el mismo archivo, se retoman solo los fragmentos que faltan.
+7. El costo en USD se suma con cada llamada (también un reintento que luego funciona, y un fallo que igual trae `usage.cost`). El total y los minutos de audio facturados se guardan junto al texto y se ponen a cero al borrar o al elegir otro archivo. Junto a **Copiar** se lee, por ejemplo, `Costo de esta transcripción: US$0,0123 · 3,5 min de audio`.
 
-El idioma no se fuerza: OpenRouter lo detecta. La respuesta es texto continuo, sin marcas de tiempo ni de hablantes.
+El idioma no se fuerza: OpenRouter lo detecta. La respuesta es texto continuo, sin marcas de tiempo ni de hablantes. Los colores siguen el tema del sistema (`prefers-color-scheme`).
 
 ## Tamaño de fragmento
 

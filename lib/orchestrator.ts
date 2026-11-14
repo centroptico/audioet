@@ -7,7 +7,40 @@ import {
   isAbortError,
   TranscribeRequestError,
 } from "./retry";
-import type { ChunkPlanItem, ChunkRecord, EncodeResult, TranscriptSnapshot } from "./types";
+import type { BillableUsage, ChunkPlanItem, ChunkRecord, EncodeResult, TranscriptSnapshot } from "./types";
+
+export type TranscribeChunkResult = {
+  text: string;
+  cost?: number;
+  seconds?: number;
+  costKnown?: boolean;
+};
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+export function roundMoney(value: number): number {
+  return Math.round(value * 1e8) / 1e8;
+}
+
+export function roundSeconds(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function usageFromResult(value: string | TranscribeChunkResult): BillableUsage & { text: string } {
+  if (typeof value === "string") return { text: value, cost: 0, seconds: 0, costKnown: true };
+  const cost = finiteNumber(value.cost);
+  const seconds = finiteNumber(value.seconds);
+  const costKnown = typeof value.costKnown === "boolean" ? value.costKnown : cost !== undefined;
+  return { text: value.text, cost: cost ?? 0, seconds: seconds ?? 0, costKnown };
+}
+
+function addUsage(total: BillableUsage, next: BillableUsage): void {
+  total.cost = roundMoney(total.cost + next.cost);
+  total.seconds = roundSeconds(total.seconds + next.seconds);
+  if (!next.costKnown) total.costKnown = false;
+}
 
 export type TranscribeInput = {
   bytes: Uint8Array;
@@ -19,7 +52,8 @@ type RunOptions = {
   plan: ChunkPlanItem[];
   initial?: Array<Pick<ChunkRecord, "index" | "status" | "text" | "error">>;
   encode: (range: { start: number; duration: number }) => Promise<EncodeResult>;
-  transcribe: (input: TranscribeInput) => Promise<string>;
+  transcribe: (input: TranscribeInput) => Promise<string | TranscribeChunkResult>;
+  initialUsage?: BillableUsage;
   concurrency?: number;
   maxChunkBytes?: number;
   signal?: AbortSignal;
@@ -42,7 +76,7 @@ export function orderedTextFrom(chunks: readonly Pick<ChunkRecord, "status" | "t
   return joinTranscripts(parts);
 }
 
-function snapshotOf(records: readonly ChunkRecord[]): TranscriptSnapshot {
+function snapshotOf(records: readonly ChunkRecord[], usage: BillableUsage): TranscriptSnapshot {
   const chunks = records.map((record) => ({ ...record }));
   return {
     chunks,
@@ -51,6 +85,9 @@ function snapshotOf(records: readonly ChunkRecord[]): TranscriptSnapshot {
     transcribing: chunks.filter((chunk) => chunk.status === "transcribing").map((chunk) => chunk.index),
     doneCount: chunks.filter((chunk) => chunk.status === "done").length,
     total: chunks.length,
+    costUsd: usage.cost,
+    billedSeconds: usage.seconds,
+    costKnown: usage.costKnown,
   };
 }
 
@@ -67,6 +104,11 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
   const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const signal = options.signal ?? new AbortController().signal;
 
+  const usage: BillableUsage = {
+    cost: finiteNumber(options.initialUsage?.cost) ?? 0,
+    seconds: finiteNumber(options.initialUsage?.seconds) ?? 0,
+    costKnown: options.initialUsage?.costKnown !== false,
+  };
   const previous = new Map(options.initial?.map((chunk) => [chunk.index, chunk]));
   const records: ChunkRecord[] = options.plan.map((item) => {
     const saved = previous.get(item.index);
@@ -76,7 +118,7 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     return { ...item, status: "pending", text: "" };
   });
 
-  const emit = () => options.onProgress?.(snapshotOf(records));
+  const emit = () => options.onProgress?.(snapshotOf(records, usage));
   emit();
 
   let encodeTail: Promise<void> = Promise.resolve();
@@ -104,13 +146,18 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     while (true) {
       if (signal.aborted) throw abortError();
       try {
-        return await options.transcribe({
-          bytes: encoded.bytes,
-          format: encoded.format,
-          signal,
-        });
+        const result = usageFromResult(
+          await options.transcribe({
+            bytes: encoded.bytes,
+            format: encoded.format,
+            signal,
+          }),
+        );
+        addUsage(usage, result);
+        return result.text;
       } catch (error) {
         if (isAbortError(error) || signal.aborted) throw abortError();
+        if (error instanceof TranscribeRequestError && error.usage) addUsage(usage, error.usage);
         const kind = error instanceof TranscribeRequestError ? classifyStatus(error.status) : "retry";
         if (kind === "fatal") throw error;
         if (kind === "split") {
@@ -195,5 +242,5 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
 
   const workers = Math.min(concurrency, Math.max(1, records.length));
   await Promise.all(Array.from({ length: workers }, () => worker()));
-  return snapshotOf(records);
+  return snapshotOf(records, usage);
 }

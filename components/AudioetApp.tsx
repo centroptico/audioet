@@ -6,7 +6,7 @@ import { postChunk } from "../lib/client-transcribe";
 import { copyText } from "../lib/copy-text";
 import { readBrowserDuration } from "../lib/duration";
 import { AudioEncoder } from "../lib/ffmpeg-engine";
-import { formatBytes, formatClock } from "../lib/format";
+import { formatBilledMinutes, formatBytes, formatClock, formatUsd } from "../lib/format";
 import { planChunks } from "../lib/chunk-plan";
 import { orderedTextFrom, runTranscription } from "../lib/orchestrator";
 import { errorMessage, isAbortError } from "../lib/retry";
@@ -168,6 +168,10 @@ export function AudioetApp() {
   const transcribing = chunks.filter((chunk) => chunk.status === "transcribing");
 
   const busy = phase !== "idle";
+  const costUsd = snapshot?.costUsd ?? saved?.costUsd ?? 0;
+  const billedSeconds = snapshot?.billedSeconds ?? saved?.billedSeconds ?? 0;
+  const costKnown = snapshot?.costKnown ?? saved?.costKnown ?? true;
+  const showCost = Boolean(meta || snapshot || (saved && saved.chunks.length > 0));
 
   const persist = (snap: TranscriptSnapshot, info: FileMeta, edited: string | null) => {
     const next: PersistedTranscript = {
@@ -180,6 +184,9 @@ export function AudioetApp() {
       fileSize: info.size,
       durationSec: info.duration,
       editedText: edited,
+      costUsd: snap.costUsd,
+      billedSeconds: snap.billedSeconds,
+      costKnown: snap.costKnown,
       chunks: persistableChunks(snap.chunks),
       updatedAt: Date.now(),
     };
@@ -229,6 +236,9 @@ export function AudioetApp() {
         transcribing: [],
         doneCount: resume.chunks.length,
         total: resume.chunks.length,
+        costUsd: resume.costUsd,
+        billedSeconds: resume.billedSeconds,
+        costKnown: resume.costKnown,
       });
       setDraft(resume.editedText);
       setNotice("Esta transcripción ya está completa. Pulsa Borrar si quieres empezar de cero.");
@@ -276,6 +286,9 @@ export function AudioetApp() {
       await runTranscription({
         plan,
         initial: resume?.chunks,
+        initialUsage: resume
+          ? { cost: resume.costUsd, seconds: resume.billedSeconds, costKnown: resume.costKnown }
+          : undefined,
         signal: controller.signal,
         encode: (range) =>
           engine().encodeRange(range.start, range.duration, (ratio) => {
@@ -354,7 +367,10 @@ export function AudioetApp() {
     <main className={busy ? "shell is-busy" : "shell"}>
       <header className="masthead">
         <div>
-          <h1 className="brand">Audioet</h1>
+          <h1 className="brand">
+            <span className="mark" aria-hidden="true" />
+            Audioet
+          </h1>
           <p className="lede">
             Transcribe notas de voz largas. El audio se parte en este dispositivo y no se guarda en ningún servidor.
           </p>
@@ -475,13 +491,24 @@ export function AudioetApp() {
 
       <section className="transcript" aria-labelledby="transcript-label">
         <div className="toolbar">
-          <div className="toolbar-buttons">
-            <button className="button primary" type="button" onClick={() => void onCopy()} disabled={!text.trim()}>
-              {copied ? "Copiado" : "Copiar"}
-            </button>
-            <button className="button ghost" type="button" onClick={onClear} disabled={!text && !meta && !saved}>
-              Borrar
-            </button>
+          <div className="toolbar-main">
+            <div className="toolbar-buttons">
+              <button className="button primary" type="button" onClick={() => void onCopy()} disabled={!text.trim()}>
+                {copied ? "Copiado" : "Copiar"}
+              </button>
+              <button className="button ghost" type="button" onClick={onClear} disabled={!text && !meta && !saved}>
+                Borrar
+              </button>
+            </div>
+            {showCost ? (
+              <p className="cost" aria-live="polite">
+                <span>
+                  Costo de esta transcripción: <strong>{formatUsd(costUsd)}</strong>
+                </span>
+                {billedSeconds > 0 ? <span className="cost-minutes">{formatBilledMinutes(billedSeconds)}</span> : null}
+                {costKnown ? null : <span className="cost-note">Falta el costo de algún fragmento.</span>}
+              </p>
+            ) : null}
           </div>
           <span className="word-count" id="transcript-label">
             {text.trim() ? `${wordCount(text).toLocaleString("es")} palabras` : "Transcripción"}

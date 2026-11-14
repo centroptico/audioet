@@ -5,16 +5,26 @@ import {
   UPSTREAM_TIMEOUT_MS,
   type AudioFormat,
 } from "./config";
+import type { BillableUsage } from "./types";
 
 export type UpstreamMode = "json" | "multipart";
 
+export type TranscriptionResult = {
+  text: string;
+  cost: number;
+  seconds: number;
+  costKnown: boolean;
+};
+
 export class OpenRouterError extends Error {
   readonly status: number;
+  readonly usage?: BillableUsage;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, usage?: BillableUsage) {
     super(message);
     this.name = "OpenRouterError";
     this.status = status;
+    this.usage = usage;
   }
 }
 
@@ -31,6 +41,38 @@ const MIME: Record<AudioFormat, string> = {
   webm: "audio/webm",
   flac: "audio/flac",
 };
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** Reads usage.cost and usage.seconds. A missing cost is 0 and costKnown is false. */
+export function readUsage(payload: unknown): BillableUsage {
+  const usage =
+    payload && typeof payload === "object" && "usage" in payload
+      ? (payload as { usage?: unknown }).usage
+      : undefined;
+  if (!usage || typeof usage !== "object") {
+    return { cost: 0, seconds: 0, costKnown: false };
+  }
+  const record = usage as { cost?: unknown; seconds?: unknown };
+  const cost = finiteNumber(record.cost);
+  const seconds = finiteNumber(record.seconds);
+  return {
+    cost: cost ?? 0,
+    seconds: seconds ?? 0,
+    costKnown: cost !== undefined,
+  };
+}
+
+function billedFromErrorBody(raw: string): BillableUsage | undefined {
+  try {
+    const usage = readUsage(JSON.parse(raw));
+    return usage.costKnown ? usage : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function redactSecret(text: string, secret: string | undefined): string {
   if (!secret || secret.length < 8) return text;
@@ -102,7 +144,7 @@ export async function transcribeWithOpenRouter(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   signal?: AbortSignal;
-}): Promise<string> {
+}): Promise<TranscriptionResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeout = AbortSignal.timeout(options.timeoutMs ?? UPSTREAM_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
@@ -123,7 +165,11 @@ export async function transcribeWithOpenRouter(options: {
 
   const raw = await response.text();
   if (!response.ok) {
-    throw new OpenRouterError(parseUpstreamError(response.status, raw, options.apiKey), response.status);
+    throw new OpenRouterError(
+      parseUpstreamError(response.status, raw, options.apiKey),
+      response.status,
+      billedFromErrorBody(raw),
+    );
   }
 
   let payload: { text?: unknown };
@@ -135,5 +181,11 @@ export async function transcribeWithOpenRouter(options: {
   if (typeof payload.text !== "string") {
     throw new OpenRouterError("OpenRouter no devolvió el campo text.", 502);
   }
-  return payload.text;
+  const usage = readUsage(payload);
+  return {
+    text: payload.text,
+    cost: usage.cost,
+    seconds: usage.seconds,
+    costKnown: usage.costKnown,
+  };
 }

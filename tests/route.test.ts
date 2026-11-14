@@ -46,7 +46,7 @@ describe("POST /api/transcribe", () => {
     assert.equal(called, false);
   });
 
-  it("forwards a small slice and returns only the transcript", async () => {
+  it("forwards a small slice and returns the transcript with its cost", async () => {
     process.env.OPENROUTER_API_KEY = secret;
     const logs: unknown[][] = [];
     const log = console.log;
@@ -66,9 +66,9 @@ describe("POST /api/transcribe", () => {
 
     try {
       const response = await POST(audioRequest({ origin: "http://localhost" }));
-      const body = (await response.json()) as { text?: string; usage?: unknown; error?: string };
+      const body = (await response.json()) as { text?: string; cost?: number; seconds?: number; costKnown?: boolean };
       assert.equal(response.status, 200);
-      assert.deepEqual(body, { text: "texto listo" });
+      assert.deepEqual(body, { text: "texto listo", cost: 0.1, seconds: 0, costKnown: true });
       assert.equal(upstreamBody.includes(secret), false);
       assert.equal(JSON.stringify(logs).includes(secret), false);
     } finally {
@@ -84,10 +84,22 @@ describe("POST /api/transcribe", () => {
         status: 401,
       });
     const failed = await POST(audioRequest());
-    const failedBody = (await failed.json()) as { error?: string };
+    const failedBody = (await failed.json()) as { error?: string; cost?: number };
     assert.equal(failed.status, 401);
     assert.match(failedBody.error ?? "", /OpenRouter: clave \[clave\] rechazada/);
     assert.equal(failedBody.error?.includes(secret), false);
+    assert.equal(failedBody.cost, undefined);
+
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ error: { message: "lento", code: 504 }, usage: { cost: 0.004, seconds: 9 } }), {
+        status: 504,
+      });
+    const billed = await POST(audioRequest());
+    const billedBody = (await billed.json()) as { error?: string; cost?: number; seconds?: number; costKnown?: boolean };
+    assert.equal(billed.status, 504);
+    assert.equal(billedBody.cost, 0.004);
+    assert.equal(billedBody.seconds, 9);
+    assert.equal(billedBody.costKnown, true);
 
     globalThis.fetch = async () => {
       throw new Error("fetch should not run");
