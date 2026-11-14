@@ -39,6 +39,9 @@ function sample(): PersistedTranscript {
     fileSize: 10,
     durationSec: 30,
     editedText: null,
+    costUsd: 0.0123,
+    billedSeconds: 90.5,
+    costKnown: true,
     chunks: [{ index: 0, start: 0, duration: 30, status: "done", text: "hola" }],
     updatedAt: 1,
   };
@@ -49,7 +52,20 @@ describe("storage", () => {
     const store = memoryStore();
     assert.equal(loadTranscript(store), null);
     assert.equal(saveTranscript(store, sample()), true);
-    assert.deepEqual(loadTranscript(store)?.chunks[0]?.text, "hola");
+    assert.equal(loadTranscript(store)?.chunks[0]?.text, "hola");
+    assert.equal(loadTranscript(store)?.costUsd, 0.0123);
+    assert.equal(loadTranscript(store)?.billedSeconds, 90.5);
+    assert.equal(loadTranscript(store)?.costKnown, true);
+    const { costUsd: _cost, billedSeconds: _seconds, costKnown: _known, ...legacy } = sample();
+    void _cost;
+    void _seconds;
+    void _known;
+    store.setItem(STORAGE_KEY, JSON.stringify(legacy));
+    const old = loadTranscript(store);
+    assert.equal(old?.costUsd, 0);
+    assert.equal(old?.billedSeconds, 0);
+    assert.equal(old?.costKnown, false);
+    assert.equal(old?.chunks[0]?.text, "hola");
     store.setItem(STORAGE_KEY, "{");
     assert.equal(loadTranscript(store), null);
     store.setItem(STORAGE_KEY, JSON.stringify({ version: 2 }));

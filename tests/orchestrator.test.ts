@@ -176,4 +176,46 @@ describe("runTranscription", () => {
     assert.notEqual(aborted.chunks[0]?.status, "done");
     assert.equal(aborted.chunks[1]?.status, "pending");
   });
+
+  it("sums the cost of every call, including a failed one and a later success", async () => {
+    let calls = 0;
+    const result = await runTranscription({
+      plan: [{ index: 0, start: 0, duration: 10 }],
+      initialUsage: { cost: 0.01, seconds: 60, costKnown: true },
+      sleep: async () => undefined,
+      encode: async () => mp3(4),
+      transcribe: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new TranscribeRequestError("rate", 429, undefined, { cost: 0.001, seconds: 2, costKnown: true });
+        }
+        return { text: "hola esto ya funciona bien", cost: 0.002, seconds: 8, costKnown: true };
+      },
+    });
+    assert.equal(result.chunks[0]?.status, "done");
+    assert.equal(result.costUsd, 0.013);
+    assert.equal(result.billedSeconds, 70);
+    assert.equal(result.costKnown, true);
+
+    const unknown = await runTranscription({
+      plan: [{ index: 0, start: 0, duration: 10 }],
+      sleep: async () => undefined,
+      encode: async () => mp3(4),
+      transcribe: async () => ({ text: "texto sin costo en la respuesta", seconds: 5 }),
+    });
+    assert.equal(unknown.costUsd, 0);
+    assert.equal(unknown.billedSeconds, 5);
+    assert.equal(unknown.costKnown, false);
+
+    const bareRetry = await runTranscription({
+      plan: [{ index: 0, start: 0, duration: 10 }],
+      sleep: async () => undefined,
+      encode: async () => mp3(4),
+      transcribe: async () => {
+        throw new TranscribeRequestError("sin costo", 400);
+      },
+    });
+    assert.equal(bareRetry.costUsd, 0);
+    assert.equal(bareRetry.costKnown, true);
+  });
 });

@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 import { OPENROUTER_MODEL, OPENROUTER_URL, UPSTREAM_MODE } from "../lib/config";
 import {
   buildUpstreamRequest,
+  OpenRouterError,
   parseUpstreamError,
+  readUsage,
   redactSecret,
   transcribeWithOpenRouter,
 } from "../lib/openrouter";
@@ -60,8 +62,20 @@ describe("OpenRouter request shape", () => {
     assert.equal(file.size, bytes.byteLength);
   });
 
-  it("returns text and surfaces the upstream message without the key", async () => {
-    const text = await transcribeWithOpenRouter({
+  it("returns text, cost and seconds, and a missing cost counts as unknown", async () => {
+    const priced = await transcribeWithOpenRouter({
+      apiKey: secret,
+      bytes,
+      format: "mp3",
+      mode: "json",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ text: "hola", usage: { seconds: 14.328, cost: 0.000398 } }), {
+          status: 200,
+        }),
+    });
+    assert.deepEqual(priced, { text: "hola", cost: 0.000398, seconds: 14.328, costKnown: true });
+
+    const missing = await transcribeWithOpenRouter({
       apiKey: secret,
       bytes,
       format: "ogg",
@@ -69,7 +83,11 @@ describe("OpenRouter request shape", () => {
       fetchImpl: async () =>
         new Response(JSON.stringify({ text: "buenos días", usage: { seconds: 1 } }), { status: 200 }),
     });
-    assert.equal(text, "buenos días");
+    assert.equal(missing.text, "buenos días");
+    assert.equal(missing.cost, 0);
+    assert.equal(missing.seconds, 1);
+    assert.equal(missing.costKnown, false);
+    assert.deepEqual(readUsage({}), { cost: 0, seconds: 0, costKnown: false });
 
     await assert.rejects(
       () =>
@@ -86,6 +104,27 @@ describe("OpenRouter request shape", () => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /bad key \[clave\]/);
         assert.equal(error.message.includes(secret), false);
+        assert.equal(error instanceof OpenRouterError && error.usage, undefined);
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () =>
+        transcribeWithOpenRouter({
+          apiKey: secret,
+          bytes,
+          format: "mp3",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({ error: { message: "rate" }, usage: { cost: 0.002, seconds: 3 } }),
+              { status: 429 },
+            ),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof OpenRouterError);
+        assert.equal(error.status, 429);
+        assert.deepEqual(error.usage, { cost: 0.002, seconds: 3, costKnown: true });
         return true;
       },
     );

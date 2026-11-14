@@ -23,6 +23,13 @@ export type EncodeResult = {
   bitrate: string;
 };
 
+/** USD cost and billed audio seconds reported by one upstream call. */
+export type BillableUsage = {
+  cost: number;
+  seconds: number;
+  costKnown: boolean;
+};
+
 export type TranscriptSnapshot = {
   chunks: ChunkRecord[];
   orderedText: string;
@@ -30,4 +37,7 @@ export type TranscriptSnapshot = {
   transcribing: number[];
   doneCount: number;
   total: number;
+  costUsd: number;
+  billedSeconds: number;
+  costKnown: boolean;
 };

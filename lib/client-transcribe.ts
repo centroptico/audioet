@@ -1,7 +1,26 @@
 import type { AudioFormat } from "./config";
 import { parseRetryAfter, TranscribeRequestError } from "./retry";
+import type { BillableUsage } from "./types";
 
-export async function postChunk(bytes: Uint8Array, format: AudioFormat, signal: AbortSignal): Promise<string> {
+export type ChunkBill = {
+  text: string;
+  cost: number;
+  seconds: number;
+  costKnown: boolean;
+};
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function billOf(payload: { cost?: unknown; seconds?: unknown; costKnown?: unknown }): BillableUsage {
+  const cost = finiteNumber(payload.cost);
+  const seconds = finiteNumber(payload.seconds);
+  const costKnown = typeof payload.costKnown === "boolean" ? payload.costKnown : cost !== undefined;
+  return { cost: cost ?? 0, seconds: seconds ?? 0, costKnown };
+}
+
+export async function postChunk(bytes: Uint8Array, format: AudioFormat, signal: AbortSignal): Promise<ChunkBill> {
   const form = new FormData();
   const blob = new Blob([bytes as BlobPart], { type: "application/octet-stream" });
   form.append("file", blob, `fragmento.${format}`);
@@ -15,7 +34,8 @@ export async function postChunk(bytes: Uint8Array, format: AudioFormat, signal: 
     throw new TranscribeRequestError("No hay conexión. Se reintentará el fragmento.", 503);
   }
 
-  let payload: { text?: unknown; error?: unknown; retryAfterMs?: unknown } = {};
+  let payload: { text?: unknown; error?: unknown; retryAfterMs?: unknown; cost?: unknown; seconds?: unknown; costKnown?: unknown } =
+    {};
   try {
     payload = (await response.json()) as typeof payload;
   } catch {
@@ -33,11 +53,13 @@ export async function postChunk(bytes: Uint8Array, format: AudioFormat, signal: 
       typeof payload.retryAfterMs === "number"
         ? payload.retryAfterMs
         : parseRetryAfter(response.headers.get("retry-after"));
-    throw new TranscribeRequestError(message, response.status, retryAfter);
+    const bill = billOf(payload);
+    throw new TranscribeRequestError(message, response.status, retryAfter, bill.costKnown ? bill : undefined);
   }
 
   if (typeof payload.text !== "string") {
     throw new TranscribeRequestError("La respuesta no trae texto.", 502);
   }
-  return payload.text;
+  const bill = billOf(payload);
+  return { text: payload.text, cost: bill.cost, seconds: bill.seconds, costKnown: bill.costKnown };
 }

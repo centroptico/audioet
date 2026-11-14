@@ -1,12 +1,16 @@
+import type { BillableUsage } from "./types";
+
 export class TranscribeRequestError extends Error {
   readonly status: number;
   readonly retryAfterMs?: number;
+  readonly usage?: BillableUsage;
 
-  constructor(message: string, status: number, retryAfterMs?: number) {
+  constructor(message: string, status: number, retryAfterMs?: number, usage?: BillableUsage) {
     super(message);
     this.name = "TranscribeRequestError";
     this.status = status;
     this.retryAfterMs = retryAfterMs;
+    this.usage = usage;
   }
 }
 
