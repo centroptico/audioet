@@ -6,15 +6,28 @@ El audio **no se guarda**. No hay base de datos, ni Blob, ni disco. El archivo s
 
 ## Cómo funciona
 
-1. Eliges o arrastras un audio (`m4a`/`aac` de iPhone o WhatsApp, `ogg`/`opus` de WhatsApp, `mp3`, `wav`, `webm`).
-2. El navegador carga **ffmpeg.wasm de un solo hilo** (no hace falta `SharedArrayBuffer` ni cabeceras COOP/COEP). El archivo se monta con **WORKERFS**, así que los ~300 MB no se copian al heap de wasm.
-3. Cada fragmento se recodifica a **mono, 16 kHz, MP3 a 32 kbps** y se sube a `POST /api/transcribe`.
-4. Esa ruta de Next.js (runtime Node, `maxDuration` 300) reenvía el audio a OpenRouter, modelo `x-ai/grok-stt-2.0`, y devuelve `{ text, cost, seconds, costKnown }`. Si `usage.cost` no viene, `cost` es 0 y `costKnown` es falso. El navegador no habla con OpenRouter.
-5. Se transcriben **3 fragmentos a la vez** mientras se codifica el siguiente. Si uno responde 429, 5xx o se cae la red, se reintenta con espera exponencial (1 s, 2 s, 4 s, hasta 4 intentos). Si pesa demasiado (413) o el proveedor no responde a tiempo (408/504/524), el fragmento se parte por la mitad y se vuelve a intentar.
-6. El texto se concatena **en orden de índice**. La caja grande se va llenando con el prefijo ya terminado. Puedes copiarlo, editarlo y recargar: el texto queda en `localStorage` hasta que pulses **Borrar** o elijas **otro** archivo. Si vuelves a elegir el mismo archivo, se retoman solo los fragmentos que faltan.
-7. El costo en USD se suma con cada llamada (también un reintento que luego funciona, y un fallo que igual trae `usage.cost`). El total y los minutos de audio facturados se guardan junto al texto y se ponen a cero al borrar o al elegir otro archivo. Junto a **Copiar** se lee, por ejemplo, `Costo de esta transcripción: US$0,0123 · 3,5 min de audio`.
+1. Eliges o arrastras un audio (`m4a`/`aac` de iPhone o WhatsApp, `ogg`/`opus` de WhatsApp, `mp3`, `wav`, `webm`). Eso **no** empieza la transcripción.
+2. Antes de pulsar **Transcribir** eliges el modelo y, si quieres, dos opciones (las dos empiezan desmarcadas): **Identificar quién habla** y **Incluir marcas de tiempo**. El modelo por defecto es **Grok (x-ai/grok-stt-2.0)**; también puedes elegir **Microsoft (microsoft/mai-transcribe-2)**. El navegador manda la clave (`grok` o `microsoft`), no el id del modelo. El servidor solo acepta esas dos.
+3. El navegador carga **ffmpeg.wasm de un solo hilo** (no hace falta `SharedArrayBuffer` ni cabeceras COOP/COEP). El archivo se monta con **WORKERFS**, así que los ~300 MB no se copian al heap de wasm.
+4. Cada fragmento se recodifica a **mono, 16 kHz, MP3 a 32 kbps** y se sube a `POST /api/transcribe`.
+5. Esa ruta de Next.js (runtime Node, `maxDuration` 300) reenvía el audio a OpenRouter y devuelve `{ text, cost, seconds, costKnown, words, segments }`. Si `usage.cost` no viene, `cost` es 0 y `costKnown` es falso. El navegador no habla con OpenRouter.
+6. Se transcriben **3 fragmentos a la vez** mientras se codifica el siguiente. Si uno responde 429, 5xx o se cae la red, se reintenta con espera exponencial (1 s, 2 s, 4 s, hasta 4 intentos). Si pesa demasiado (413) o el proveedor no responde a tiempo (408/504/524), el fragmento se parte por la mitad y se vuelve a intentar.
+7. El texto se concatena **en orden de índice**. La caja grande se va llenando con el prefijo ya terminado. Puedes copiarlo, editarlo y recargar: el texto, el costo y las opciones quedan en `localStorage` hasta que pulses **Borrar** o elijas **otro** archivo. Si vuelves a elegir el mismo archivo, se retoman solo los fragmentos que faltan, con las mismas opciones.
+8. El costo en USD se suma con cada llamada (también un reintento que luego funciona, y un fallo que igual trae `usage.cost`). El total y los minutos de audio facturados se guardan junto al texto y se ponen a cero al borrar o al elegir otro archivo. Junto a **Copiar** se lee, por ejemplo, `Costo de esta transcripción: US$0,0123 · 3,5 min de audio`.
 
-El idioma no se fuerza: OpenRouter lo detecta. La respuesta es texto continuo, sin marcas de tiempo ni de hablantes. Los colores siguen el tema del sistema (`prefers-color-scheme`).
+El idioma no se fuerza: OpenRouter lo detecta. Los colores siguen el tema del sistema (`prefers-color-scheme`).
+
+### Texto, voces y marcas de tiempo
+
+Sin ninguna de las dos casillas, la respuesta es texto continuo. Las palabras con tiempo solo se usan por dentro para alinear; en pantalla no hay una línea por palabra.
+
+- **Marcas de tiempo:** un `[hh:mm:ss]` al principio de cada frase (o de un bloque de unos 30 s si no hay punto). La hora es la del audio completo, no la del fragmento.
+- **Quién habla:** las frases seguidas de la misma persona se juntan en un párrafo, `Speaker 1: …`, `Speaker 2: …`. Si también hay marcas, el párrafo lleva **una** sola, al principio.
+- Con **Grok** y voces, la petición usa `response_format: verbose_json` y `provider.options.xai.diarize`. Grok rechaza `diarize` en la raíz. Esa separación es poco fiable (a veces marca a todo el mundo como la misma persona). La pantalla lo avisa y recomienda Microsoft.
+- Con **Microsoft** y voces, la petición usa `verbose_json` y `diarize: true`. Microsoft sí separa las voces en la prueba que se hizo.
+- El solape de 5 s se quita por tiempo: del segundo fragmento en adelante se descartan las palabras que empiezan antes del final del fragmento anterior. No se usa el recorte por palabras, porque se comería la etiqueta `Speaker N`.
+
+Los ids de hablante empiezan de cero en cada fragmento de 10 minutos. Cuando termina el audio, si pediste voces, `POST /api/speakers` manda a OpenRouter un extracto corto (primera y última frase de cada persona, y las frases donde alguien dice su nombre) al modelo de chat `x-ai/grok-4.3` (el Grok general más barato que figuraba en el catálogo público; no hay un modelo “mini”). Pide un JSON que unifica a la misma persona entre fragmentos y cambia `Speaker N` por un nombre solo si la conversación lo dice claro (“soy Ana”). No reescribe lo dicho. Ese costo se suma al total; los segundos del chat no se suman a los minutos de audio. Si falla, se dejan las etiquetas de cada fragmento y se avisa en español.
 
 ## Tamaño de fragmento
 
@@ -37,7 +50,7 @@ La ruta, por defecto, llama a OpenRouter con el JSON documentado:
 }
 ```
 
-No se envía `language`. La constante `UPSTREAM_MODE` en `lib/config.ts` puede pasar a `"multipart"` (campo `file` + `model`) si el JSON da problemas. El mensaje de error de OpenRouter se muestra en la pantalla, sin la clave.
+No se envía `language`. Con voces o marcas se añade `response_format: verbose_json`. Microsoft con voces añade `diarize: true`. Grok con voces añade `provider.options.xai.diarize` y no manda `diarize` en la raíz. La constante `UPSTREAM_MODE` en `lib/config.ts` puede pasar a `"multipart"` (campo `file` + `model`) si el JSON da problemas; en multipart no viaja la opción de proveedor de Grok, así que la diarización de Grok se queda en JSON. El mensaje de error de OpenRouter se muestra en la pantalla, sin la clave.
 
 OpenRouter corta la transcripción aguas arriba alrededor de los 60 s. Por eso la ruta aborta a los 70 s y el cliente parte ese fragmento. El `maxDuration` de 300 s es el máximo del plan Hobby y solo evita que Vercel mate la función antes.
 
@@ -52,7 +65,7 @@ Copia `.env.example`. En local puedes crear `.env.local` (no se commitea). En Ve
 | `OPENROUTER_API_KEY` | Sí, para transcribir | Solo en el servidor. Nunca se manda al navegador ni se escribe en logs. |
 | `OPENROUTER_SITE_URL` | No | Se manda como `HTTP-Referer`. Si falta, se usa el `Origin` de la petición. |
 
-Sin la clave, `/api/transcribe` responde 422 con `Falta OPENROUTER_API_KEY en el servidor.`
+Sin la clave, `/api/transcribe` y `/api/speakers` responden 422 con `Falta OPENROUTER_API_KEY en el servidor.` `/api/speakers` (`maxDuration` 60) solo recibe extractos de texto, nunca audio.
 
 ## Proyectos en Vercel (Hobby)
 
@@ -101,7 +114,9 @@ No hay llamadas reales a OpenRouter en los tests: no tenemos la clave. El upstre
 - La primera visita descarga unos **31 MB** de `ffmpeg-core.wasm`. El navegador los cachea. En un móvil, con datos justos, esa descarga ya se nota.
 - El core es de **un solo hilo**. Codificar 3 horas puede tardar tanto como el audio, o más, sobre todo en un teléfono. Hay que dejar la pantalla encendida y la pestaña abierta. En el móvil se pide Screen Wake Lock y se avisa; en modo de bajo consumo iOS puede denegarlo.
 - Si cierras la pestaña a medias, el texto ya hecho sigue en `localStorage`. El audio no. Para seguir, vuelve a elegir **el mismo** archivo (mismo nombre, tamaño y fecha). **Borrar** tira el texto.
-- El solape y el dedup de palabras no son perfectos. Si el modelo frasea el corte de otra forma, puede quedar una repetición corta o faltar un par de palabras.
+- El solape y el dedup no son perfectos. El seek cae en un keyframe, así que en el corte pueden sobrar o faltar un par de palabras. Si el modo con voces no trae palabras ni segmentos, se deja el texto plano y el solape puede repetirse.
+- Grok, con la opción de voces, a menudo etiqueta a todo el mundo como la misma persona. Microsoft lo hace mejor. La unificación de nombres entre fragmentos depende del modelo de chat y puede equivocarse; un nombre solo sustituye a `Speaker N` cuando el extracto lo deja claro y la respuesta es una etiqueta corta.
+- No hay un Grok “mini” en el catálogo público. Unificar hablantes usa `x-ai/grok-4.3` y suma un costo pequeño aparte de los minutos de audio.
 - `decodeAudioData` no se usa: el PCM de varias horas no cabe en un móvil.
 - La página es pública. Quien la abre gasta crédito de OpenRouter. No hay auth a propósito.
 - El core `@ffmpeg/core@0.12.10` es **GPL-2.0-or-later** (el build incluye libmp3lame). El código está en [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm). No lo modificamos; se sirve tal cual al navegador.

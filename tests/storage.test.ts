@@ -42,6 +42,10 @@ function sample(): PersistedTranscript {
     costUsd: 0.0123,
     billedSeconds: 90.5,
     costKnown: true,
+    speakers: true,
+    timestamps: false,
+    model: "microsoft",
+    speakerUnifyFailed: false,
     chunks: [{ index: 0, start: 0, duration: 30, status: "done", text: "hola" }],
     updatedAt: 1,
   };
@@ -66,6 +70,18 @@ describe("storage", () => {
     assert.equal(old?.billedSeconds, 0);
     assert.equal(old?.costKnown, false);
     assert.equal(old?.chunks[0]?.text, "hola");
+    const { speakers: _speakers, timestamps: _timestamps, model: _model, speakerUnifyFailed: _failed, ...withoutJob } =
+      sample();
+    void _speakers;
+    void _timestamps;
+    void _model;
+    void _failed;
+    store.setItem(STORAGE_KEY, JSON.stringify(withoutJob));
+    const bare = loadTranscript(store);
+    assert.equal(bare?.speakers, false);
+    assert.equal(bare?.timestamps, false);
+    assert.equal(bare?.model, "grok");
+    assert.equal(bare?.speakerUnifyFailed, false);
     store.setItem(STORAGE_KEY, "{");
     assert.equal(loadTranscript(store), null);
     store.setItem(STORAGE_KEY, JSON.stringify({ version: 2 }));

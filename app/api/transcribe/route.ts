@@ -1,13 +1,14 @@
-import { API_MAX_BYTES, isAudioFormat } from "../../../lib/config";
+import { API_MAX_BYTES, isAudioFormat, isSttModelKey } from "../../../lib/config";
 import { isSameOrigin } from "../../../lib/origin";
 import { OpenRouterError, transcribeWithOpenRouter } from "../../../lib/openrouter";
+import { flagOn, type TranscriptJob } from "../../../lib/transcript-job";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 /**
- * Forwards one audio slice to OpenRouter and returns `{ text, cost, seconds, costKnown }`.
+ * Forwards one audio slice to OpenRouter and returns `{ text, cost, seconds, costKnown, words, segments }`.
  * The bytes exist only for this request. Nothing is written to disk,
  * Blob storage, or a database.
  */
@@ -49,6 +50,16 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
+  const modelKey = String(form.get("model") ?? "grok");
+  if (!isSttModelKey(modelKey)) {
+    return Response.json({ error: "Modelo no permitido." }, { status: 400 });
+  }
+  const job: TranscriptJob = {
+    speakers: flagOn(form.get("speakers")),
+    timestamps: flagOn(form.get("timestamps")),
+    model: modelKey,
+  };
+
   const bytes = new Uint8Array(await file.arrayBuffer());
   const origin = request.headers.get("origin");
   const siteUrl = process.env.OPENROUTER_SITE_URL || origin || undefined;
@@ -59,6 +70,7 @@ export async function POST(request: Request): Promise<Response> {
       bytes,
       format,
       siteUrl,
+      job,
       signal: request.signal,
     });
     return Response.json({
@@ -66,6 +78,8 @@ export async function POST(request: Request): Promise<Response> {
       cost: result.cost,
       seconds: result.seconds,
       costKnown: result.costKnown,
+      words: result.words,
+      segments: result.segments,
     });
   } catch (error) {
     if (error instanceof OpenRouterError) {
