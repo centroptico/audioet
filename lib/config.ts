@@ -24,6 +24,29 @@ export const UPSTREAM_MODE = "json" as "json" | "multipart";
 
 export const OPENROUTER_MODEL = "x-ai/grok-stt-2.0";
 export const OPENROUTER_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
+export const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+/**
+ * Allowlisted speech models. The browser sends the key (`grok` or `microsoft`),
+ * and the server is the only place that turns it into an OpenRouter model id.
+ */
+export const STT_MODELS = {
+  grok: "x-ai/grok-stt-2.0",
+  microsoft: "microsoft/mai-transcribe-2",
+} as const;
+
+export type SttModelKey = keyof typeof STT_MODELS;
+
+export function isSttModelKey(value: string): value is SttModelKey {
+  return value === "grok" || value === "microsoft";
+}
+
+/**
+ * Chat model that unifies speaker labels. Checked against the OpenRouter
+ * models list on 2026-11-19: there is no Grok mini or fast slug, and this is
+ * the cheapest current general Grok (not a batch or build variant).
+ */
+export const SPEAKER_MODEL = "x-ai/grok-4.3";
 
 export const AUDIO_FORMATS = ["wav", "mp3", "flac", "m4a", "ogg", "webm", "aac"] as const;
 export type AudioFormat = (typeof AUDIO_FORMATS)[number];

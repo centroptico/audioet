@@ -1,10 +1,14 @@
 import {
   OPENROUTER_MODEL,
   OPENROUTER_URL,
+  STT_MODELS,
   UPSTREAM_MODE,
   UPSTREAM_TIMEOUT_MS,
   type AudioFormat,
 } from "./config";
+import type { TranscriptJob } from "./transcript-job";
+import { jobNeedsStructure } from "./transcript-job";
+import type { TimedSegment, TimedWord } from "./transcript-format";
 import type { BillableUsage } from "./types";
 
 export type UpstreamMode = "json" | "multipart";
@@ -14,6 +18,8 @@ export type TranscriptionResult = {
   cost: number;
   seconds: number;
   costKnown: boolean;
+  words: TimedWord[];
+  segments: TimedSegment[];
 };
 
 export class OpenRouterError extends Error {
@@ -100,12 +106,28 @@ export function parseUpstreamError(status: number, raw: string, secret?: string)
   return redactSecret(message, secret).slice(0, 800);
 }
 
+function jobPayload(job: TranscriptJob | undefined): Record<string, unknown> {
+  const model = job ? STT_MODELS[job.model] : OPENROUTER_MODEL;
+  const payload: Record<string, unknown> = { model };
+  if (!job || !jobNeedsStructure(job)) return payload;
+  payload.response_format = "verbose_json";
+  if (!job.speakers) return payload;
+  if (job.model === "microsoft") {
+    payload.diarize = true;
+    return payload;
+  }
+  // Grok rejects a top-level diarize flag. The provider option is accepted.
+  payload.provider = { options: { xai: { diarize: true } } };
+  return payload;
+}
+
 export function buildUpstreamRequest(options: {
   apiKey: string;
   bytes: Uint8Array;
   format: AudioFormat;
   siteUrl?: string;
   mode?: UpstreamMode;
+  job?: TranscriptJob;
 }): { url: string; init: RequestInit } {
   const mode = options.mode ?? UPSTREAM_MODE;
   const headers: Record<string, string> = {
@@ -113,6 +135,7 @@ export function buildUpstreamRequest(options: {
     "X-Title": "Audioet",
   };
   if (options.siteUrl) headers["HTTP-Referer"] = options.siteUrl;
+  const extra = jobPayload(options.job);
 
   if (mode === "multipart") {
     const form = new FormData();
@@ -120,13 +143,15 @@ export function buildUpstreamRequest(options: {
       type: MIME[options.format],
     });
     form.append("file", file);
-    form.append("model", OPENROUTER_MODEL);
+    form.append("model", String(extra.model));
+    if (typeof extra.response_format === "string") form.append("response_format", extra.response_format);
+    if (extra.diarize === true) form.append("diarize", "true");
     return { url: OPENROUTER_URL, init: { method: "POST", headers, body: form } };
   }
 
   headers["Content-Type"] = "application/json";
   const body = JSON.stringify({
-    model: OPENROUTER_MODEL,
+    ...extra,
     input_audio: {
       data: Buffer.from(options.bytes).toString("base64"),
       format: options.format,
@@ -135,12 +160,32 @@ export function buildUpstreamRequest(options: {
   return { url: OPENROUTER_URL, init: { method: "POST", headers, body } };
 }
 
+function readTimedList(value: unknown, textKey: "word" | "text"): Array<TimedWord | TimedSegment> {
+  if (!Array.isArray(value)) return [];
+  const items: Array<TimedWord | TimedSegment> = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as { word?: unknown; text?: unknown; start?: unknown; end?: unknown; speaker?: unknown };
+    const rawText = textKey === "word" ? record.word : record.text;
+    const text = typeof rawText === "string" ? rawText.trim() : "";
+    const start = finiteNumber(record.start);
+    if (!text || start === undefined) continue;
+    const end = finiteNumber(record.end) ?? start;
+    const speaker = finiteNumber(record.speaker);
+    const item = { start, end, ...(speaker !== undefined && speaker >= 0 ? { speaker: Math.floor(speaker) } : {}) };
+    if (textKey === "word") items.push({ ...item, word: text });
+    else items.push({ ...item, text });
+  }
+  return items;
+}
+
 export async function transcribeWithOpenRouter(options: {
   apiKey: string;
   bytes: Uint8Array;
   format: AudioFormat;
   siteUrl?: string;
   mode?: UpstreamMode;
+  job?: TranscriptJob;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -172,20 +217,27 @@ export async function transcribeWithOpenRouter(options: {
     );
   }
 
-  let payload: { text?: unknown };
+  let payload: { text?: unknown; words?: unknown; segments?: unknown };
   try {
-    payload = JSON.parse(raw) as { text?: unknown };
+    payload = JSON.parse(raw) as { text?: unknown; words?: unknown; segments?: unknown };
   } catch {
     throw new OpenRouterError("OpenRouter devolvió una respuesta que no es JSON.", 502);
   }
-  if (typeof payload.text !== "string") {
+  const usage = readUsage(payload);
+  const verbose = Boolean(options.job && jobNeedsStructure(options.job));
+  const words = verbose ? (readTimedList(payload.words, "word") as TimedWord[]) : [];
+  const segments = verbose && words.length === 0 ? (readTimedList(payload.segments, "text") as TimedSegment[]) : [];
+  const segmentText = segments.map((segment) => segment.text).join(" ");
+  const text = typeof payload.text === "string" ? payload.text : segmentText;
+  if (!text && words.length === 0 && segments.length === 0) {
     throw new OpenRouterError("OpenRouter no devolvió el campo text.", 502);
   }
-  const usage = readUsage(payload);
   return {
-    text: payload.text,
+    text,
     cost: usage.cost,
     seconds: usage.seconds,
     costKnown: usage.costKnown,
+    words,
+    segments,
   };
 }

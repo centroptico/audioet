@@ -1,4 +1,5 @@
 import { OVERLAP_SECONDS, CHUNK_SECONDS, PLAN_VERSION } from "./config";
+import { jobFromParts, type TranscriptJob } from "./transcript-job";
 import type { ChunkRecord } from "./types";
 
 export const STORAGE_KEY = "audioet:v1";
@@ -28,6 +29,11 @@ export type PersistedTranscript = {
   billedSeconds: number;
   /** False when at least one call did not report usage.cost. */
   costKnown: boolean;
+  speakers: boolean;
+  timestamps: boolean;
+  model: TranscriptJob["model"];
+  /** The name-unification call failed; per-chunk labels were kept. */
+  speakerUnifyFailed: boolean;
   chunks: PersistedChunk[];
   updatedAt: number;
 };
@@ -79,6 +85,8 @@ export function loadTranscript(store: KeyValueStore): PersistedTranscript | null
       costUsd: asMoney(parsed.costUsd),
       billedSeconds: asMoney(parsed.billedSeconds),
       costKnown: typeof parsed.costKnown === "boolean" ? parsed.costKnown : false,
+      ...jobFromParts(parsed),
+      speakerUnifyFailed: parsed.speakerUnifyFailed === true,
     };
   } catch {
     return null;

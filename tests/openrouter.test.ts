@@ -45,6 +45,52 @@ describe("OpenRouter request shape", () => {
     assert.equal(JSON.stringify(body).includes(secret), false);
   });
 
+  it("sends verbose JSON for timestamps and diarizes Grok only through provider options", async () => {
+    const grok = buildUpstreamRequest({
+      apiKey: secret,
+      bytes,
+      format: "mp3",
+      job: { speakers: true, timestamps: true, model: "grok" },
+    });
+    const grokBody = (await new Request(grok.url, grok.init).json()) as {
+      model?: string;
+      language?: string;
+      diarize?: boolean;
+      response_format?: string;
+      provider?: { options?: { xai?: { diarize?: boolean } } };
+    };
+    assert.equal(grokBody.model, "x-ai/grok-stt-2.0");
+    assert.equal(grokBody.language, undefined);
+    assert.equal(grokBody.diarize, undefined);
+    assert.equal(grokBody.response_format, "verbose_json");
+    assert.equal(grokBody.provider?.options?.xai?.diarize, true);
+
+    const microsoft = buildUpstreamRequest({
+      apiKey: secret,
+      bytes,
+      format: "mp3",
+      job: { speakers: true, timestamps: false, model: "microsoft" },
+    });
+    const microsoftBody = (await new Request(microsoft.url, microsoft.init).json()) as {
+      model?: string;
+      diarize?: boolean;
+      provider?: unknown;
+    };
+    assert.equal(microsoftBody.model, "microsoft/mai-transcribe-2");
+    assert.equal(microsoftBody.diarize, true);
+    assert.equal(microsoftBody.provider, undefined);
+
+    const timed = buildUpstreamRequest({
+      apiKey: secret,
+      bytes,
+      format: "mp3",
+      job: { speakers: false, timestamps: true, model: "grok" },
+    });
+    const timedBody = (await new Request(timed.url, timed.init).json()) as { diarize?: boolean; provider?: unknown };
+    assert.equal(timedBody.diarize, undefined);
+    assert.equal(timedBody.provider, undefined);
+  });
+
   it("can switch to multipart without forcing a language", async () => {
     const built = buildUpstreamRequest({
       apiKey: secret,
@@ -73,7 +119,14 @@ describe("OpenRouter request shape", () => {
           status: 200,
         }),
     });
-    assert.deepEqual(priced, { text: "hola", cost: 0.000398, seconds: 14.328, costKnown: true });
+    assert.deepEqual(priced, {
+      text: "hola",
+      cost: 0.000398,
+      seconds: 14.328,
+      costKnown: true,
+      words: [],
+      segments: [],
+    });
 
     const missing = await transcribeWithOpenRouter({
       apiKey: secret,
