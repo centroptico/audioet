@@ -46,6 +46,10 @@ export type TranscribeInput = {
   bytes: Uint8Array;
   format: EncodeResult["format"];
   signal: AbortSignal;
+  /** Start of this slice in the original file, in seconds. */
+  start: number;
+  /** Absolute time before which this slice's words repeat the previous slice. */
+  dropBefore: number;
 };
 
 type RunOptions = {
@@ -54,6 +58,8 @@ type RunOptions = {
   encode: (range: { start: number; duration: number }) => Promise<EncodeResult>;
   transcribe: (input: TranscribeInput) => Promise<string | TranscribeChunkResult>;
   initialUsage?: BillableUsage;
+  /** Paragraph output. Slices are concatenated instead of word-deduped. */
+  structured?: boolean;
   concurrency?: number;
   maxChunkBytes?: number;
   signal?: AbortSignal;
@@ -67,20 +73,32 @@ function abortError(): Error {
   return error;
 }
 
-export function orderedTextFrom(chunks: readonly Pick<ChunkRecord, "status" | "text">[]): string {
+export function joinBlocks(previous: string, next: string): string {
+  const left = previous.trim();
+  const right = next.trim();
+  if (!left) return right;
+  if (!right) return left;
+  return `${left}\n\n${right}`;
+}
+
+export function orderedTextFrom(
+  chunks: readonly Pick<ChunkRecord, "status" | "text">[],
+  mode: "plain" | "blocks" = "plain",
+): string {
   const parts: string[] = [];
   for (const chunk of chunks) {
     if (chunk.status !== "done") break;
     parts.push(chunk.text);
   }
+  if (mode === "blocks") return parts.map((part) => part.trim()).filter(Boolean).join("\n\n");
   return joinTranscripts(parts);
 }
 
-function snapshotOf(records: readonly ChunkRecord[], usage: BillableUsage): TranscriptSnapshot {
+function snapshotOf(records: readonly ChunkRecord[], usage: BillableUsage, structured: boolean): TranscriptSnapshot {
   const chunks = records.map((record) => ({ ...record }));
   return {
     chunks,
-    orderedText: orderedTextFrom(chunks),
+    orderedText: orderedTextFrom(chunks, structured ? "blocks" : "plain"),
     encodingIndex: chunks.find((chunk) => chunk.status === "encoding")?.index ?? null,
     transcribing: chunks.filter((chunk) => chunk.status === "transcribing").map((chunk) => chunk.index),
     doneCount: chunks.filter((chunk) => chunk.status === "done").length,
@@ -118,7 +136,8 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     return { ...item, status: "pending", text: "" };
   });
 
-  const emit = () => options.onProgress?.(snapshotOf(records, usage));
+  const structured = options.structured === true;
+  const emit = () => options.onProgress?.(snapshotOf(records, usage, structured));
   emit();
 
   let encodeTail: Promise<void> = Promise.resolve();
@@ -140,7 +159,9 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
 
   const canSplit = (duration: number, depth: number) => depth < 4 && duration > MIN_SPLIT_SECONDS * 2;
 
-  const sendWithRetry = async (encoded: EncodeResult): Promise<string> => {
+  const combine = structured ? joinBlocks : mergeTranscripts;
+
+  const sendWithRetry = async (encoded: EncodeResult, start: number, dropBefore: number): Promise<string> => {
     let retries = 0;
     let splitTries = 0;
     while (true) {
@@ -151,6 +172,8 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
             bytes: encoded.bytes,
             format: encoded.format,
             signal,
+            start,
+            dropBefore,
           }),
         );
         addUsage(usage, result);
@@ -176,12 +199,19 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     }
   };
 
-  const splitRange = async (start: number, duration: number, depth: number, index: number): Promise<string> => {
+  const splitRange = async (
+    start: number,
+    duration: number,
+    depth: number,
+    index: number,
+    dropBefore: number,
+  ): Promise<string> => {
     const mid = duration / 2;
     const overlap = Math.min(OVERLAP_SECONDS, mid / 4);
-    const left = await transcribeRange(start, mid + overlap, depth + 1, index);
-    const right = await transcribeRange(start + mid, duration - mid, depth + 1, index);
-    return mergeTranscripts(left, right);
+    const leftEnd = start + mid + overlap;
+    const left = await transcribeRange(start, mid + overlap, depth + 1, index, dropBefore);
+    const right = await transcribeRange(start + mid, duration - mid, depth + 1, index, leftEnd);
+    return combine(left, right);
   };
 
   const transcribeRange = async (
@@ -189,6 +219,7 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     duration: number,
     depth: number,
     index: number,
+    dropBefore: number,
   ): Promise<string> => {
     if (signal.aborted) throw abortError();
     const encoded = await encodeExclusive({ start, duration }, () => {
@@ -199,17 +230,17 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
     });
     if (signal.aborted) throw abortError();
     if (encoded.bytes.byteLength > maxChunkBytes && canSplit(duration, depth)) {
-      return splitRange(start, duration, depth, index);
+      return splitRange(start, duration, depth, index, dropBefore);
     }
     records[index] = { ...records[index], status: "transcribing" };
     emit();
     try {
-      return await sendWithRetry(encoded);
+      return await sendWithRetry(encoded, start, dropBefore);
     } catch (error) {
       if (isAbortError(error) || signal.aborted) throw abortError();
       const kind = error instanceof TranscribeRequestError ? classifyStatus(error.status) : "retry";
       if (kind === "split" && canSplit(duration, depth)) {
-        return splitRange(start, duration, depth, index);
+        return splitRange(start, duration, depth, index, dropBefore);
       }
       throw error;
     }
@@ -223,7 +254,9 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
       if (index >= records.length) return;
       if (records[index].status === "done") continue;
       try {
-        const text = await transcribeRange(records[index].start, records[index].duration, 0, index);
+        const dropBefore =
+          index === 0 ? records[index].start : records[index - 1].start + records[index - 1].duration;
+        const text = await transcribeRange(records[index].start, records[index].duration, 0, index, dropBefore);
         if (signal.aborted) return;
         records[index] = { ...records[index], status: "done", text, error: undefined };
         emit();
@@ -242,5 +275,5 @@ export async function runTranscription(options: RunOptions): Promise<TranscriptS
 
   const workers = Math.min(concurrency, Math.max(1, records.length));
   await Promise.all(Array.from({ length: workers }, () => worker()));
-  return snapshotOf(records, usage);
+  return snapshotOf(records, usage, structured);
 }
